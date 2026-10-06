@@ -1,4 +1,4 @@
-# dsh-plugin-skillhub-finder
+# dsh-skillhub-finder
 
 English | [中文](README.zh.md)
 
@@ -43,25 +43,25 @@ becomes a no-op and the button stays adjacent to the model selector, between it 
 From a checkout of this directory, using the path form of `dsh plugin`:
 
 ```sh
-dsh plugin --profile web add ./dsh-plugin-skillhub-finder
+dsh plugin --profile web add ./dsh-skillhub-finder
 ```
 
 Or from a packed tarball:
 
 ```sh
 npm pack
-dsh plugin --profile web add ./dsh-plugin-skillhub-finder-0.1.0.tgz
+dsh plugin --profile web add ./dsh-skillhub-finder-0.1.0.tgz
 ```
 
 Then restart the profile. The profile patch inserts one Loader row:
 
 ```yaml
 - insert:
-    - id: dsh-plugin-skillhub-finder
-      name: dsh-plugin-skillhub-finder
+    - id: dsh-skillhub-finder
+      name: dsh-skillhub-finder
 ```
 
-Remove it the same way, with `dsh plugin --profile web remove dsh-plugin-skillhub-finder`.
+Remove it the same way, with `dsh plugin --profile web remove dsh-skillhub-finder`.
 
 ## Use
 
@@ -111,10 +111,18 @@ The install root is editable at runtime, from the tab itself — no profile edit
 3. Pick a directory. The Host validates it, creates it when missing, proves it is writable, and
    only then adopts it. **恢复默认** returns to `$DSH_HOME/skills`.
 
-The chosen path is persisted through the settings document when this composition has one, and the
-Host reads its Config live, so a new root applies to the very next install. Without a settings
-service the path still takes effect for the session, and the tab says it was not saved rather than
-pretending otherwise.
+The chosen path is written into this plugin's own profile row through `ctx.configEditor.edit`, which
+validates, persists and reconciles the Loader through the normal path — so it survives a restart, and
+the Host reads its Config live so it also applies to the very next install. When that service is
+missing or the write is refused, the path still takes effect for the session and the tab says why it
+was not saved rather than pretending otherwise.
+
+> `ctx.settings.update` is deliberately **not** used. It only addresses entries the settings
+> projection considers *configurable*, and it refuses this plugin with
+> `No configurable plugin entry "dsh-skillhub-finder"`, because a hand-written Standard Schema is not
+> a projection it can surface. The config editor has no such precondition. Surfacing a real Settings
+> page would additionally require a Schemastery `Config` with `.volatile()` fields — which is a
+> module-load-time dependency this build-step-free plugin does not take.
 
 ## Configuration
 
@@ -122,8 +130,8 @@ The same value can be set up front in the profile's `cordis.patch.yml`:
 
 ```yaml
 - insert:
-    - id: dsh-plugin-skillhub-finder
-      name: dsh-plugin-skillhub-finder
+    - id: dsh-skillhub-finder
+      name: dsh-skillhub-finder
       config:
         apiBase: https://api.skillhub.cn
         installDir: D:/skills
@@ -139,7 +147,7 @@ process cwd happens to be) and a filesystem root are refused, and `~` is expande
 Two halves, one package.
 
 **Host half** (`lib/index.js`) registers a same-origin route prefix
-`/dsh-plugin-skillhub-finder/api` on `ctx.webServer` and owns every filesystem write:
+`/dsh-skillhub-finder/api` on `ctx.webServer` and owns every filesystem write:
 
 | Route | Purpose |
 |---|---|
@@ -164,7 +172,7 @@ zip is unpacked where the filesystem lives.
   type; `ctx.sidebarRight.openTab('skillhub-finder')` opens and expands it.
 - One shared store per client run connects the button to every mounted tab, exposed to both through
   the registration's `inject` face.
-- The stylesheet is a plain `<style data-plugin="dsh-plugin-skillhub-finder">` tag owned by the
+- The stylesheet is a plain `<style data-plugin="dsh-skillhub-finder">` tag owned by the
   fiber, over `--dsw-alias-*` / `--dsw-focus-ring-*` tokens. The install button fills with
   `--dsw-alias-button-info-fill` — the composer send button's own token — rather than
   `--dsw-alias-button-primary-fill`, which resolves through `--dsw-alias-brand-primary` to
@@ -203,7 +211,7 @@ exactly one opaque line — the entry's client state is literally `failed`:
 
 ```
 web boot: 1 entry did not activate
-dsh-plugin-skillhub-finder: failed
+dsh-skillhub-finder: failed
 ```
 
 It names neither the throwing call nor the error. This plugin hit it once:

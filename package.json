@@ -1,5 +1,5 @@
 {
-  "name": "dsh-plugin-skillhub-finder",
+  "name": "dsh-skillhub-finder",
   "version": "0.1.0",
   "description": "A round SkillHub button in the DSH composer: read the draft, extract keywords, find helpful skills on skillhub.cn and install them from the right sidebar",
   "keywords": [

@@ -1,4 +1,4 @@
-# dsh-plugin-skillhub-finder
+# dsh-skillhub-finder
 
 [English](README.md) | 中文
 
@@ -39,14 +39,14 @@
 在本目录下用 `dsh plugin` 的路径形式：
 
 ```sh
-dsh plugin --profile web add ./dsh-plugin-skillhub-finder
+dsh plugin --profile web add ./dsh-skillhub-finder
 ```
 
 或者打包成 tarball 再装：
 
 ```sh
 npm pack
-dsh plugin --profile web add ./dsh-plugin-skillhub-finder-0.1.0.tgz
+dsh plugin --profile web add ./dsh-skillhub-finder-0.1.0.tgz
 ```
 
 profile 名按你实际用的改（本项目在 `desktop` profile 上验证）。**Host 半的改动需要重启**；只改客户端
@@ -56,11 +56,11 @@ bundle 时刷新页面即可。
 
 ```yaml
 - insert:
-    - id: dsh-plugin-skillhub-finder
-      name: dsh-plugin-skillhub-finder
+    - id: dsh-skillhub-finder
+      name: dsh-skillhub-finder
 ```
 
-卸载同理：`dsh plugin --profile web remove dsh-plugin-skillhub-finder`。
+卸载同理：`dsh plugin --profile web remove dsh-skillhub-finder`。
 
 ## 使用
 
@@ -104,9 +104,15 @@ bundle 时刷新页面即可。
 3. 选一个目录。Host 会先校验它、不存在就创建、确认可写，**然后才采用**。点 **恢复默认** 回到
    `$DSH_HOME/skills`。
 
-所选路径在当前组合有设置服务时会通过 settings 文档持久化；Host 是**读取活的 Config** 的，所以新目录
-对下一次安装立即生效。如果没有设置服务，目录仍在本次会话内生效，并且标签页会明说「未保存」，而不是
+所选路径通过 `ctx.configEditor.edit` 写进本插件自己的 profile 行——它会校验、持久化，并通过正常路径
+reconcile Loader，所以**能跨重启保留**；同时 Host 是**读取活的 Config** 的，所以新目录对下一次安装也立即
+生效。当这个服务不存在或写入被拒绝时，目录仍在本次会话内生效，并且标签页会说明**为什么没保存**，而不是
 假装保存成功了。
+
+> 这里**刻意不用** `ctx.settings.update`。它只处理 settings 投影认为是「可配置」的条目，对本插件会报
+> `No configurable plugin entry "dsh-skillhub-finder"`——因为手写的 Standard Schema 不是它能投影的结构。
+> `configEditor` 没有这个前提条件。若要让配置出现在真正的设置页面里，还需要一个带 `.volatile()` 字段的
+> Schemastery `Config`，而那是**模块加载期**的依赖，这个免构建的插件不引入。
 
 ## 配置
 
@@ -114,8 +120,8 @@ bundle 时刷新页面即可。
 
 ```yaml
 - insert:
-    - id: dsh-plugin-skillhub-finder
-      name: dsh-plugin-skillhub-finder
+    - id: dsh-skillhub-finder
+      name: dsh-skillhub-finder
       config:
         apiBase: https://api.skillhub.cn
         installDir: D:/skills
@@ -129,7 +135,7 @@ bundle 时刷新页面即可。
 
 两半，一个包。
 
-**Host 半**（`lib/index.js`）在 `ctx.webServer` 上注册同源路由前缀 `/dsh-plugin-skillhub-finder/api`，
+**Host 半**（`lib/index.js`）在 `ctx.webServer` 上注册同源路由前缀 `/dsh-skillhub-finder/api`，
 并独占所有文件系统写入：
 
 | 路由 | 用途 |
@@ -154,7 +160,7 @@ bundle 时刷新页面即可。
   `ctx.sidebarRight.openTab('skillhub-finder')` 打开并展开它。
 - 每次客户端运行共享一个 store，把按钮和每个已挂载的标签页连起来，通过注册的 `inject` 面同时交给
   两边。
-- 样式表是一个由 fiber 持有的普通 `<style data-plugin="dsh-plugin-skillhub-finder">` 标签，只用
+- 样式表是一个由 fiber 持有的普通 `<style data-plugin="dsh-skillhub-finder">` 标签，只用
   `--dsw-alias-*` / `--dsw-focus-ring-*` token。
 
 ### 安装是如何保证安全的
@@ -185,7 +191,7 @@ schema，以及每个 `exports` 条目都指向真实存在的文件。
 
 ```
 web boot: 1 entry did not activate
-dsh-plugin-skillhub-finder: failed
+dsh-skillhub-finder: failed
 ```
 
 它既不说哪个调用抛的，也不说错误是什么。本插件撞过一次：`sidebarRightTabs.register()` 内部会执行

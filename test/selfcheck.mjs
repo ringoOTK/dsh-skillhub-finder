@@ -1,5 +1,5 @@
 /**
- * Offline self-check for dsh-plugin-skillhub-finder.
+ * Offline self-check for dsh-skillhub-finder.
  *
  *   node test/selfcheck.mjs
  *
@@ -27,7 +27,7 @@ const ROOT = dirname(dirname(fileURLToPath(import.meta.url)))
 const CLIENT_PATH = join(ROOT, 'lib', 'client.js')
 const HOST_PATH = join(ROOT, 'lib', 'index.js')
 
-const PKG_NAME = 'dsh-plugin-skillhub-finder'
+const PKG_NAME = 'dsh-skillhub-finder'
 
 test('package.json declares the bundle and client contract', async () => {
   const pkg = JSON.parse(await readFile(join(ROOT, 'package.json'), 'utf8'))
@@ -216,7 +216,7 @@ test('apply() registers the composer button, the tab type, and both tab seats', 
  * from the shipped bundle. Keeping this here is the whole point: `guide` must
  * be an ARRAY (the registry runs `(definition.guide ?? []).map(...)`), and
  * getting that wrong fails the entire plugin fiber at boot with nothing shown
- * but `dsh-plugin-skillhub-finder: failed`.
+ * but `dsh-skillhub-finder: failed`.
  * @param {Record<string, any>} definition - a tab type definition.
  * @param {Set<string>} ids - ids already registered.
  * @param {Map<string, string>} kinds - kind to occupying band.
@@ -285,7 +285,7 @@ test('both READMEs exist and cross-link', async () => {
   // Both must document the same load-bearing things, so a translation cannot rot.
   for (const [label, text] of [['en', en], ['zh', zh]]) {
     for (const required of [
-      'dsh-plugin-skillhub-finder',
+      'dsh-skillhub-finder',
       'conversation.input.right',
       'sidebar.right.pane.tab',
       'skillhub.cn',
@@ -508,8 +508,11 @@ async function mountHost(config = {}) {
     webServer: { register: (route) => { routes.push(route); return () => {} } },
     effect: (callback) => { callback(); return () => {} },
     emit: (event) => { emitted.push(event) },
-    get: (key) => (key === 'settings' ? ctx.__settings : undefined),
+    // The Host reads optional services through ctx.get; a test installs the one
+    // it needs on the context object itself.
+    get: (key) => ctx[`__${key}`],
     __settings: null,
+    __configEditor: null,
   }
   mod.apply(ctx, config)
   assert.equal(routes.length, 1, 'the Host half must register exactly one route')
@@ -575,7 +578,7 @@ test('a Config change reaches the routes without re-applying the plugin', async 
   const target = join(tmpdir(), 'skhf-live-dir')
   const host = await mountHost({ installDir: join(tmpdir(), 'skhf-first-dir') })
 
-  const before = await host.request('GET', '/dsh-plugin-skillhub-finder/api/meta')
+  const before = await host.request('GET', '/dsh-skillhub-finder/api/meta')
   assert.equal(before.status, 200)
   assert.equal(before.json.installDir, join(tmpdir(), 'skhf-first-dir'))
   assert.ok(before.json.defaultInstallDir, 'the default must be reported for the reset control')
@@ -583,7 +586,7 @@ test('a Config change reaches the routes without re-applying the plugin', async 
   // Mutate the SAME object the plugin was applied with, as a re-apply would.
   host.config.installDir = target
 
-  const after = await host.request('GET', '/dsh-plugin-skillhub-finder/api/meta')
+  const after = await host.request('GET', '/dsh-skillhub-finder/api/meta')
   assert.equal(after.json.installDir, target, 'the route must read the live Config, not a snapshot')
   assert.equal(after.json.installDirWritable, true, 'a creatable directory must probe as writable')
 })
@@ -595,48 +598,89 @@ test('the install-dir route probes before persisting, and refuses bad input', as
   // Without a settings service the directory still takes effect, and the caller
   // is told it was not saved rather than being left to assume it was.
   const chosen = await host.request(
-    'POST', '/dsh-plugin-skillhub-finder/api/install-dir',
+    'POST', '/dsh-skillhub-finder/api/install-dir',
     { installDir: target }, { origin: 'http://127.0.0.1:1' },
   )
   assert.equal(chosen.status, 200)
   assert.equal(chosen.json.installDir, target)
   assert.equal(chosen.json.persisted, false)
-  assert.match(chosen.json.note, /no settings service/)
+  assert.match(chosen.json.note, /no config editor|next restart/)
 
-  const meta = await host.request('GET', '/dsh-plugin-skillhub-finder/api/meta')
+  const meta = await host.request('GET', '/dsh-skillhub-finder/api/meta')
   assert.equal(meta.json.installDir, target, 'the chosen directory must be in effect')
 
   // Guards: cross-origin, relative, and a path that is not a directory.
-  const foreign = await host.request('POST', '/dsh-plugin-skillhub-finder/api/install-dir',
+  const foreign = await host.request('POST', '/dsh-skillhub-finder/api/install-dir',
     { installDir: target }, { origin: 'http://evil.example' })
   assert.equal(foreign.status, 403)
 
-  const relative = await host.request('POST', '/dsh-plugin-skillhub-finder/api/install-dir',
+  const relative = await host.request('POST', '/dsh-skillhub-finder/api/install-dir',
     { installDir: 'not/absolute' }, { origin: 'http://127.0.0.1:1' })
   assert.equal(relative.status, 400)
   assert.match(relative.json.error, /absolute path/)
 
-  const asRoot = await host.request('POST', '/dsh-plugin-skillhub-finder/api/install-dir',
+  const asRoot = await host.request('POST', '/dsh-skillhub-finder/api/install-dir',
     { installDir: parse(process.cwd()).root }, { origin: 'http://127.0.0.1:1' })
   assert.equal(asRoot.status, 400)
   assert.match(asRoot.json.error, /filesystem root/)
 })
 
-test('a settings service is used to persist the chosen directory', async () => {
+test('the config editor is used to persist the chosen directory', async () => {
   const target = join(tmpdir(), 'skhf-persisted-dir')
   const host = await mountHost({})
-  const updates = []
-  host.ctx.__settings = {
-    describe: () => [{ ns: PKG_NAME, revision: 7 }],
-    update: async (ns, patch, revision) => { updates.push({ ns, patch, revision }) },
+  const edits = []
+  const entry = { id: PKG_NAME, options: { id: PKG_NAME } }
+  host.ctx.__configEditor = {
+    entries: () => [entry],
+    configuration: () => [],
+    edit: async (target_, change) => {
+      edits.push({ target: target_, next: change({ installDir: 'old' }, {}) })
+    },
   }
 
-  const result = await host.request('POST', '/dsh-plugin-skillhub-finder/api/install-dir',
+  const result = await host.request('POST', '/dsh-skillhub-finder/api/install-dir',
     { installDir: target }, { origin: 'http://127.0.0.1:1' })
 
   assert.equal(result.status, 200)
-  assert.equal(result.json.persisted, true)
-  assert.deepEqual(updates, [{ ns: PKG_NAME, patch: { installDir: target }, revision: 7 }])
+  assert.equal(result.json.persisted, true, `note: ${result.json.note}`)
+  assert.equal(result.json.note, '')
+  // The change is derived from the current config, so unrelated fields survive.
+  assert.deepEqual(edits, [{ target: entry, next: { installDir: target } }])
+
+  const meta = await host.request('GET', '/dsh-skillhub-finder/api/meta')
+  assert.equal(meta.json.canPersistInstallDir, true)
+})
+
+test('a refused config edit still leaves the directory in effect for the session', async () => {
+  const target = join(tmpdir(), 'skhf-refused-dir')
+  const host = await mountHost({})
+  host.ctx.__configEditor = {
+    entries: () => [{ id: PKG_NAME }],
+    configuration: () => [],
+    edit: async () => { throw new Error('loader refused the write') },
+  }
+
+  const result = await host.request('POST', '/dsh-skillhub-finder/api/install-dir',
+    { installDir: target }, { origin: 'http://127.0.0.1:1' })
+
+  assert.equal(result.status, 200)
+  assert.equal(result.json.persisted, false)
+  // The user must be able to tell WHY it was not saved.
+  assert.match(result.json.note, /loader refused the write/)
+
+  const meta = await host.request('GET', '/dsh-skillhub-finder/api/meta')
+  assert.equal(meta.json.installDir, target, 'the directory must still be adopted for this session')
+})
+
+test('an unaddressable profile row is reported, not silently ignored', async () => {
+  const host = await mountHost({})
+  host.ctx.__configEditor = { entries: () => [], configuration: () => [], edit: async () => {} }
+
+  const result = await host.request('POST', '/dsh-skillhub-finder/api/install-dir',
+    { installDir: join(tmpdir(), 'skhf-unaddressable') }, { origin: 'http://127.0.0.1:1' })
+
+  assert.equal(result.json.persisted, false)
+  assert.match(result.json.note, /no profile row is addressable/)
 })
 
 test('the composer button disables itself on an empty draft', async () => {
