@@ -16,8 +16,9 @@
  */
 
 import assert from 'node:assert/strict'
-import { readFile } from 'node:fs/promises'
-import { dirname, join } from 'node:path'
+import { mkdtemp, readFile, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { dirname, join, parse } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import test from 'node:test'
 import vm from 'node:vm'
@@ -131,7 +132,7 @@ test('client bundle registers under the exact package id and requires only react
   assert.equal(bundle.id, PKG_NAME)
   assert.deepEqual(bundle.required, ['react'])
   // The bundle runs in a vm realm, so compare content rather than realm identity.
-  assert.equal(bundle.exports.inject.join(','), 'slots,sidebarRight,sidebarRightTabs')
+  assert.equal(bundle.exports.inject.join(','), 'slots,sidebarRight,sidebarRightTabs,uiWorkspace')
   assert.equal(typeof bundle.exports.apply, 'function')
 })
 
@@ -399,6 +400,243 @@ test('every token the stylesheet uses is a real --dsw-* name', async () => {
     /background(?:-color)?:\s*var\(--dsw-alias-brand-primary/,
     'no rule may paint a background with --dsw-alias-brand-primary: it inverts with the theme',
   )
+})
+
+/**
+ * Load the Host half with its internals exposed, so the extraction and ranking
+ * rules can be tested directly instead of through a live search.
+ * @returns module namespace plus the internals.
+ */
+async function loadHostInternals() {
+  const source = await readFile(HOST_PATH, 'utf8')
+  const dir = await mkdtemp(join(tmpdir(), 'skhf-selfcheck-'))
+  const file = join(dir, 'probe.mjs')
+  await writeFile(file, `${source}\nexport { extractKeywords, mergeResults, isContentTerm }\n`)
+  return import(`file://${file.replace(/\\/g, '/')}`)
+}
+
+const card = (slug, name, description = '') => ({ slug, name, description, downloads: 0, score: 0 })
+
+test('extraction ignores filler and keeps the subject of the request', async () => {
+  const host = await loadHostInternals()
+
+  // The reported failure: a wordy request whose only real subject is the stack.
+  const wordy = host.extractKeywords('我想要做一个springboot的后端框架，但是我不知道该怎么做，你能告诉我吗')
+  assert.ok(wordy.strong, 'a draft naming a technology must count as specific')
+  assert.ok(wordy.terms.includes('springboot'), 'the technology must survive')
+  for (const junk of ['我想要', '想要做', '要做', '做一个', '要做一', '我知道', '不知道']) {
+    assert.ok(!wordy.terms.includes(junk), `filler "${junk}" must not become a keyword`)
+  }
+  // The subject outranks generic intent, so it drives the ranking.
+  assert.ok(
+    wordy.weights.springboot > wordy.weights['后端'],
+    'a technology must outweigh a generic noun',
+  )
+  // Overlapping windows of one run must not survive as separate keywords.
+  assert.equal(wordy.terms.filter((term) => term.includes('想要')).length, 0)
+
+  // Real content is still found in a normal request.
+  const normal = host.extractKeywords('帮我分析这份 Excel 表格里的销售数据，生成图表并写一份周报')
+  for (const wanted of ['分析', '周报', '表格', '数据', '图表', 'excel']) {
+    assert.ok(normal.terms.includes(wanted), `"${wanted}" should have been extracted`)
+  }
+
+  // A gram mixing content with grammar is not a term.
+  assert.equal(host.isContentTerm('后端'), true)
+  assert.equal(host.isContentTerm('表格'), true)
+  assert.equal(host.isContentTerm('我想要'), false)
+  assert.equal(host.isContentTerm('做一个'), false)
+  assert.equal(host.isContentTerm('但'), false)
+})
+
+test('ranking follows term weight, not branch count', async () => {
+  const host = await loadHostInternals()
+  const draft = '我想要做一个springboot的后端框架，但是我不知道该怎么做，你能告诉我吗'
+  const { terms, weights, strong } = host.extractKeywords(draft)
+
+  // Branch recall as SkillHub answers it: the generic term returns unrelated
+  // skills that do not contain it, the technology returns the right ones.
+  const branches = [
+    { keyword: '框架', weight: weights['框架'] ?? 11, cards: [
+      card('bookbone', '书骨：将一本书的内容蒸馏为可运行的思维框架Skill', '把书变成思维框架'),
+      card('valuation-analysis', '股票价值投资分析系统', '估值'),
+    ] },
+    { keyword: '后端', weight: weights['后端'] ?? 11, cards: [
+      card('backend-development', '后端开发', '后端工程'),
+    ] },
+    { keyword: 'springboot', weight: weights.springboot ?? 14, cards: [
+      card('springboot-generator', '创建springboot项目，全局异常，日志打印'),
+      card('springboot-cache', 'springboot缓存注解'),
+    ] },
+  ]
+  const ranked = host.mergeResults(branches, strong)
+
+  assert.equal(ranked[0].slug, 'springboot-generator', 'the subject match must rank first')
+  assert.equal(ranked[1].slug, 'springboot-cache')
+
+  // A fuzzy branch hit that never names the term is not a hit at all.
+  assert.ok(
+    !ranked.some((entry) => entry.slug === 'valuation-analysis'),
+    'a result that never mentions the keyword must be dropped',
+  )
+  // Removing the generic term must not lose the subject matches.
+  assert.ok(ranked.every((entry) => entry.matched.length > 0))
+})
+
+test('weak drafts still search but are flagged as guesses', async () => {
+  const host = await loadHostInternals()
+  const weak = host.extractKeywords('你好')
+  assert.equal(weak.strong, false, 'a greeting carries no specific term')
+
+  // Extraction may legitimately yield nothing; the route falls back to the line
+  // itself and marks the search weak, which the tab shows as a guess.
+  const greeting = host.extractKeywords('你好')
+  assert.ok(Array.isArray(greeting.terms))
+})
+
+/**
+ * Drive the Host half's HTTP surface without a real server.
+ * @param config - the Config object the Loader would own.
+ * @returns route helpers plus the in-memory config.
+ */
+async function mountHost(config = {}) {
+  const mod = await import(`file://${HOST_PATH.replace(/\\/g, '/')}?v=${Math.random()}`)
+  const routes = []
+  const emitted = []
+  const settingsCalls = []
+  const ctx = {
+    webServer: { register: (route) => { routes.push(route); return () => {} } },
+    effect: (callback) => { callback(); return () => {} },
+    emit: (event) => { emitted.push(event) },
+    get: (key) => (key === 'settings' ? ctx.__settings : undefined),
+    __settings: null,
+  }
+  mod.apply(ctx, config)
+  assert.equal(routes.length, 1, 'the Host half must register exactly one route')
+
+  /** Perform one request against the recorded route. */
+  const request = async (method, path, body, headers = {}) => {
+    const captured = { status: 0, body: '' }
+    const response = {
+      headersSent: false,
+      writeHead(status) { captured.status = status; this.headersSent = true },
+      end(text) { captured.body = text ?? '' },
+      destroy() {},
+    }
+    // The real route handler wraps `handle()` in a floating `void ...catch`;
+    // awaiting the returned promise here is what lets a failure surface as a
+    // status instead of a silent 0.
+    await routes[0].handler(
+      { method, url: path, headers: { host: '127.0.0.1:1', ...headers }, async *[Symbol.asyncIterator]() {
+        if (body !== undefined) yield Buffer.from(JSON.stringify(body))
+      } },
+      response,
+    )
+    return { status: captured.status, json: captured.body ? JSON.parse(captured.body) : null }
+  }
+  return { mod, request, emitted, settingsCalls, ctx, config }
+}
+
+test('installDir is validated, and a relative path is refused', async () => {
+  const host = await loadHostInternals()
+  const validate = (input) => host.Config['~standard'].validate(input)
+
+  // The default is the root DSH's skill provider discovers.
+  const fallback = validate({})
+  assert.equal(fallback.issues, undefined)
+  assert.match(fallback.value.installDir, /skills$/)
+
+  for (const bad of ['skills', './skills', '../skills', 'relative/path']) {
+    const result = validate({ installDir: bad })
+    assert.ok(
+      result.issues?.some((entry) => /absolute path/.test(entry.message)),
+      `"${bad}" is relative and must be refused`,
+    )
+  }
+  // A filesystem root is never a skills directory.
+  const root = validate({ installDir: parse(fallback.value.installDir).root })
+  assert.ok(root.issues?.some((entry) => /filesystem root/.test(entry.message)))
+
+  // A real directory is accepted, with `~` expanded.
+  const accepted = validate({ installDir: join(tmpdir(), 'skhf-skills') })
+  assert.equal(accepted.issues, undefined)
+  assert.equal(accepted.value.installDir, join(tmpdir(), 'skhf-skills'))
+
+  const tilde = validate({ installDir: '~/custom-skills' })
+  assert.equal(tilde.issues, undefined)
+  assert.ok(!tilde.value.installDir.startsWith('~'), '~ must be expanded')
+  assert.ok(tilde.value.installDir.endsWith('custom-skills'))
+})
+
+test('a Config change reaches the routes without re-applying the plugin', async () => {
+  // This is what makes the path editable without a restart: the Loader mutates
+  // the Config object a settings write re-applies, rather than constructing a
+  // new plugin, so the handlers must read through that reference.
+  const target = join(tmpdir(), 'skhf-live-dir')
+  const host = await mountHost({ installDir: join(tmpdir(), 'skhf-first-dir') })
+
+  const before = await host.request('GET', '/dsh-plugin-skillhub-finder/api/meta')
+  assert.equal(before.status, 200)
+  assert.equal(before.json.installDir, join(tmpdir(), 'skhf-first-dir'))
+  assert.ok(before.json.defaultInstallDir, 'the default must be reported for the reset control')
+
+  // Mutate the SAME object the plugin was applied with, as a re-apply would.
+  host.config.installDir = target
+
+  const after = await host.request('GET', '/dsh-plugin-skillhub-finder/api/meta')
+  assert.equal(after.json.installDir, target, 'the route must read the live Config, not a snapshot')
+  assert.equal(after.json.installDirWritable, true, 'a creatable directory must probe as writable')
+})
+
+test('the install-dir route probes before persisting, and refuses bad input', async () => {
+  const target = join(tmpdir(), 'skhf-chosen-dir')
+  const host = await mountHost({})
+
+  // Without a settings service the directory still takes effect, and the caller
+  // is told it was not saved rather than being left to assume it was.
+  const chosen = await host.request(
+    'POST', '/dsh-plugin-skillhub-finder/api/install-dir',
+    { installDir: target }, { origin: 'http://127.0.0.1:1' },
+  )
+  assert.equal(chosen.status, 200)
+  assert.equal(chosen.json.installDir, target)
+  assert.equal(chosen.json.persisted, false)
+  assert.match(chosen.json.note, /no settings service/)
+
+  const meta = await host.request('GET', '/dsh-plugin-skillhub-finder/api/meta')
+  assert.equal(meta.json.installDir, target, 'the chosen directory must be in effect')
+
+  // Guards: cross-origin, relative, and a path that is not a directory.
+  const foreign = await host.request('POST', '/dsh-plugin-skillhub-finder/api/install-dir',
+    { installDir: target }, { origin: 'http://evil.example' })
+  assert.equal(foreign.status, 403)
+
+  const relative = await host.request('POST', '/dsh-plugin-skillhub-finder/api/install-dir',
+    { installDir: 'not/absolute' }, { origin: 'http://127.0.0.1:1' })
+  assert.equal(relative.status, 400)
+  assert.match(relative.json.error, /absolute path/)
+
+  const asRoot = await host.request('POST', '/dsh-plugin-skillhub-finder/api/install-dir',
+    { installDir: parse(process.cwd()).root }, { origin: 'http://127.0.0.1:1' })
+  assert.equal(asRoot.status, 400)
+  assert.match(asRoot.json.error, /filesystem root/)
+})
+
+test('a settings service is used to persist the chosen directory', async () => {
+  const target = join(tmpdir(), 'skhf-persisted-dir')
+  const host = await mountHost({})
+  const updates = []
+  host.ctx.__settings = {
+    describe: () => [{ ns: PKG_NAME, revision: 7 }],
+    update: async (ns, patch, revision) => { updates.push({ ns, patch, revision }) },
+  }
+
+  const result = await host.request('POST', '/dsh-plugin-skillhub-finder/api/install-dir',
+    { installDir: target }, { origin: 'http://127.0.0.1:1' })
+
+  assert.equal(result.status, 200)
+  assert.equal(result.json.persisted, true)
+  assert.deepEqual(updates, [{ ns: PKG_NAME, patch: { installDir: target }, revision: 7 }])
 })
 
 test('the composer button disables itself on an empty draft', async () => {

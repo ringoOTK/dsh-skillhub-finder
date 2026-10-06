@@ -76,22 +76,49 @@ Remove it the same way, with `dsh plugin --profile web remove dsh-plugin-skillhu
 
 Keyword extraction runs on the **Host**, not in the browser:
 
-- Chinese text is scored by 2- and 3-grams with a filler-phrase penalty, so `数据分析` survives and
-  `请帮我` does not.
-- English words are scored by length and frequency, minus a stopword list.
-- A weighted intent vocabulary (`总结`, `翻译`, `爬虫`, `正则`, `复盘`, …) and a domain vocabulary
-  (`pdf`, `excel`, `sql`, `typescript`, …) outrank the statistics.
-- A shorter candidate already contained in a longer one is dropped (`数据` loses to `数据分析`).
+- Chinese candidates are gated on a **function-character deny list**: a 2- to 4-gram
+  survives only when it contains no pronoun, particle or modal. That is what rejects the
+  filler every request is full of. A stop-phrase list alone cannot do it — the n-grams that
+  straddle two content words (`我想要`, `想要做`, `做一个`) score higher than the single real
+  term beside them, and they were once the top keywords for a SpringBoot request.
+- Terms are weighted, not counted. Curated **subject** terms (technologies, products, file
+  formats: `springboot`, `excel`, `pdf`, `mysql`) outrank generic **intent** terms
+  (`分析`, `周报`, `框架`), which outrank statistical n-grams. `我想要做一个springboot的后端框架`
+  therefore yields `springboot` and `后端` — and drops `框架`, whose matches are
+  "思维框架" and "记忆系统框架".
+- English words are gated the same way, minus a filler list.
 
-The surviving keywords are searched **in parallel** against
-`GET https://api.skillhub.cn/api/skills?keyword=…&sortBy=score`, merged by slug, and ranked by how
-many keyword branches matched, then by SkillHub's own score, then by downloads. A skill whose
-search branch fails does not fail the whole search.
+Each surviving keyword is searched against
+`GET https://api.skillhub.cn/api/skills?keyword=…&sortBy=score`, then results are merged by
+slug and ranked by **weight**, not by how many branches matched. Two evidence rules apply:
+
+- A card only counts as a hit for a keyword when that keyword **actually appears** in the
+  card's name, slug or summary. `sortBy=score` is a fuzzy tokenized recall, so the branch
+  for `框架` returns stock analysers and social-media reports that do not contain the term
+  at all.
+- Name hits outweigh summary hits.
+
+A skill whose search branch fails does not fail the whole search. When a draft carries no
+subject term (`你好`), the search still runs on the line itself, the snapshot is flagged
+`weak`, and the tab says the matches are a guess rather than pretending they are hits.
+
+## Choosing where skills are installed
+
+The install root is editable at runtime, from the tab itself — no profile edit, no restart:
+
+1. Open the **SkillHub 技能** tab.
+2. **更改** next to the current path opens the client's own folder picker.
+3. Pick a directory. The Host validates it, creates it when missing, proves it is writable, and
+   only then adopts it. **恢复默认** returns to `$DSH_HOME/skills`.
+
+The chosen path is persisted through the settings document when this composition has one, and the
+Host reads its Config live, so a new root applies to the very next install. Without a settings
+service the path still takes effect for the session, and the tab says it was not saved rather than
+pretending otherwise.
 
 ## Configuration
 
-Optional — override the row in the profile's `cordis.patch.yml`. An invalid value fails plugin
-load rather than surfacing later:
+The same value can be set up front in the profile's `cordis.patch.yml`:
 
 ```yaml
 - insert:
@@ -99,11 +126,13 @@ load rather than surfacing later:
       name: dsh-plugin-skillhub-finder
       config:
         apiBase: https://api.skillhub.cn
-        installDir: ~/.dsh/skills
+        installDir: D:/skills
 ```
 
-`apiBase` must be an absolute `http(s)` URL without credentials. `installDir` defaults to
-`$DSH_HOME/skills`, or `~/.dsh/skills`.
+`apiBase` must be an absolute `http(s)` URL without credentials. `installDir` is validated both when
+the plugin loads and whenever it changes: a relative path (it would resolve against whatever the
+process cwd happens to be) and a filesystem root are refused, and `~` is expanded. The default is
+`$DSH_HOME/skills`, i.e. `~/.dsh/skills`.
 
 ## Architecture
 
@@ -116,8 +145,9 @@ Two halves, one package.
 |---|---|
 | `POST /search` | extract keywords from the draft (or accept explicit ones), search, merge, mark installed |
 | `GET /latest` | the last snapshot, so a reloaded page restores its results |
-| `GET /meta` | API base, install directory, category labels |
+| `GET /meta` | API base, install directory, its default, writability, category labels |
 | `GET /detail?slug=` | one skill's detail projection |
+| `POST /install-dir` | validate, create and adopt a new skills root |
 | `POST /install` | download the zip, unpack it into the skills root |
 | `POST /uninstall` | remove an installed skill |
 
