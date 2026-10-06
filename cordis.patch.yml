@@ -1,0 +1,6 @@
+# dsh-plugin-skillhub-finder: SkillHub discovery button for the composer plus a
+# right-Sidebar results tab. The Host half proxies api.skillhub.cn and installs
+# the chosen skill into the DSH skills root.
+- insert:
+    - id: dsh-plugin-skillhub-finder
+      name: dsh-plugin-skillhub-finder
